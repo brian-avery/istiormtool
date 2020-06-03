@@ -1,16 +1,22 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 
+	"github.com/google/go-github/v32/github"
 	"github.com/spf13/cobra"
-	"github.com/google/go-github/v32/github"	
 )
 
 var (
+	ghRepository        string
+	ghOrganization      string
+	targetTag           string
+	branch              string
+	releaseNoteTemplate string
+
 	//bavery_todo:cleanup
 	rootCmd = cobra.Command{
 		Use:   "irmt",
@@ -61,57 +67,45 @@ func httpGet(url string) ([]byte, error) {
 	return body, nil
 }
 
-func getCommitForTagFromBody(targetTagName string, body []byte) (map[string]interface{}, error) {
-	var dataDump []map[string]interface{}
-	if err := json.Unmarshal(body, &dataDump); err != nil {
-		return nil, err
-	}
-
-	for _, tag := range dataDump {
-		tagName := tag["name"]
-		if targetTagName == tagName {
-			return tag, nil
-		}
-	}
-
-	return nil, fmt.Errorf("not found\n")
-}
-
-func getCommitFromTag(tag map[string]interface{}) (map[string]interface{}, error) {
-	commit, success := tag["commit"].(map[string]interface{})
-	if !success {
-		return nil, fmt.Errorf("Can't parse commit\n")
-
-	}
-	return commit, nil
-}
-
 func genReleaseNotes(cmd *cobra.Command, args []string) {
 	fmt.Printf("Generating release notes:%+v\n\n", args)
 
-	targetTag := "1.6.0"
-	body, err := httpGet(fmt.Sprintf("https://api.github.com/repos/istio/istio/commits/%s", targetTag))
+	ghClient := github.NewClient(nil)
+	prOptions := &github.PullRequestListOptions{
+		State: "all",
+		Base:  branch,
+	}
+	pulls, _, err := ghClient.PullRequests.List(context.Background(), ghOrganization, ghRepository, prOptions)
 	if err != nil {
-		fmt.Printf("Failed to get commit: %+v", err)
-		return
+		fmt.Printf("Failed to list pulls: %+v", err)
 	}
 
-	var commitBody map[string]interface{}
-	err = json.Unmarshal(body, &commitBody)
-	if err != nil {
-		fmt.Printf("Failed to parse commit body: %+v", err)
-		return
-	}
+	for _, pull := range pulls {
+		mergedAt := ""
+		if pull.MergedAt != nil {
+			mergedAt = pull.MergedAt.Format("2006 01/02-15:04:05.000")
+		}
 
-	fmt.Printf("commiturl: %s", commitBody)
-	commitCommit := commitBody["commit"].(map[string]interface{})
-	commitCommitter, success := commitCommit["committer"].(map[string]interface{})
-	if !success {
-		fmt.Printf("Failed to parse committer: %+v", err)
-		return
-	}
+		labels := func(labels []*github.Label) []string {
+			validLabels := make([]string, 0)
+			for _, label := range labels {
+				if label != nil {
+					validLabels = append(validLabels, *(*label).Name)
+				}
+			}
+			return validLabels
+		}(pull.Labels)
 
-	fmt.Printf("Commit for %s:%s published: %+v\n", targetTag, commitCommitter["date"])
+		fmt.Printf("Pull %d: \n\t state: %s \n\t title: %s \n\t body: %+v\n\t labels: %+v\n\t mergedat:%s\n\t IssueURL:%s\n\t HTMLUrl:%s \n\t\n",
+			*pull.ID,
+			*pull.State,
+			*pull.Title,
+			*pull.Body,
+			labels,
+			mergedAt,
+			*pull.IssueURL,
+			*pull.HTMLURL)
+	}
 
 }
 
@@ -121,6 +115,56 @@ func cut(cmd *cobra.Command, args []string) {
 
 func releaseStatus(cmd *cobra.Command, args []string) {
 	fmt.Printf("Release isn't done yet. Please try again")
+
+	pulls, _, err := ghClient.PullRequests.List(context.Background(), ghOrganization, ghRepository, prOptions)
+	if err != nil {
+		fmt.Printf("Failed to list pulls: %+v", err)
+	}
+
+	for _, pull := range pulls {
+		mergedAt := ""
+		if pull.MergedAt != nil {
+			mergedAt = pull.MergedAt.Format("2006 01/02-15:04:05.000")
+		}
+
+		labels := func(labels []*github.Label) []string {
+			validLabels := make([]string, 0)
+			for _, label := range labels {
+				if label != nil {
+					validLabels = append(validLabels, *(*label).Name)
+				}
+			}
+			return validLabels
+		}(pull.Labels)
+
+		ghClient := github.NewClient(nil)
+		prOptions := &github.PullRequestListOptions{
+			State: "all",
+			Base:  branch,
+		}
+
+		complete := 0
+		remaining := 0
+		needsDocumentation := 0
+		for label := range labels {
+			if pull.state == "open" {
+				fmt.Printf("Pull %d: \n\t state: %s \n\t title: %s \n\t body: %+v\n\t labels: %+v\n\t mergedat:%s\n\t IssueURL:%s\n\t HTMLUrl:%s \n\t\n",
+					*pull.ID,
+					*pull.State,
+					*pull.Title,
+					*pull.Body,
+					labels,
+					mergedAt,
+					*pull.IssueURL,
+					*pull.HTMLURL)
+				remaining++
+			}
+
+			complete++
+			continue
+		}
+	}
+
 }
 
 func cutRelease(cmd *cobra.Command, args []string) {
@@ -128,6 +172,10 @@ func cutRelease(cmd *cobra.Command, args []string) {
 }
 
 func main() {
+	rootCmd.PersistentFlags().StringVar(&ghRepository, "ghrepository", "istio", "GitHub repository")
+	rootCmd.PersistentFlags().StringVar(&ghOrganization, "ghorg", "istio", "GitHub organization")
+	rootCmd.PersistentFlags().StringVar(&branch, "branch", "", "Repository branch")
+	versionCmd.Flags().StringVar(&releaseNoteTemplate, "template", "", "Release notes template.")
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(releaseNotesCmd)
 	rootCmd.AddCommand(statusCmd)
